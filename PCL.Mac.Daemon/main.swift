@@ -17,82 +17,64 @@ func showDialog(message: String, title: String = "提示") {
     task.waitUntilExit()
 }
 
-func isProcessRunning(pid: pid_t) -> Bool {
-    return kill(pid, 0) == 0
+func exportCrashReport(_ crashTime: Date, _ diagnosticReportURL: URL) {
+    do {
+        log("正在导出崩溃报告")
+        let fileManager = FileManager.default
+        let reportURL = fileManager
+            .homeDirectoryForCurrentUser
+            .appending(path: "Desktop")
+            .appending(path: "PCL.Mac-crash-\(crashTime.timeIntervalSince1970)")
+        try fileManager.createDirectory(at: reportURL, withIntermediateDirectories: true)
+        try fileManager.copyItem(at: diagnosticReportURL, to: reportURL.appending(path: "诊断报告.ips"))
+        let logURL = fileManager.homeDirectoryForCurrentUser
+            .appending(path: "Library")
+            .appending(path: "Application Support")
+            .appending(path: "PCL-Mac")
+            .appending(path: "Logs")
+            .appending(path: "app.log")
+        try fileManager.copyItem(at: logURL, to: reportURL.appending(path: "启动器日志.log"))
+        showDialog(message: "很抱歉，PCL.Mac 因为一些问题崩溃了……\n一个诊断报告已被生成在你的桌面上。\n若要寻求帮助，请将诊断报告压缩并发给他人，而不是发送此页面的照片或截图。")
+    } catch {
+        err("无法导出崩溃报告: \(error.localizedDescription)")
+    }
 }
 
-func onProcessExit() throws {
-    log("进程已退出")
-    let exitTime = Date()
-    var isCrash = false
-    var reportURL: URL!
-    
-    log("正在检查 DiagnosticReports")
-    for _ in 0..<5 {
-        if isCrash { break }
-        // 获取所有诊断报告
-        let reports = try FileManager.default.contentsOfDirectory(
-            at: .libraryDirectory.appending(path: "Logs").appending(path: "DiagnosticReports"),
-            includingPropertiesForKeys: nil
-        ).filter { $0.lastPathComponent.starts(with: "PCL.Mac") }
-        
-        for report in reports {
-            if report.lastPathComponent.wholeMatch(of: /PCL\.Mac-\d{4}-\d{2}-\d{2}-\d{6}\.ips/) != nil {
-                let resourceValues = try report.resourceValues(forKeys: [.creationDateKey])
-                if let creationDate = resourceValues.creationDate,
-                   abs(creationDate.timeIntervalSince(exitTime)) < 10 {
-                    log("报告 \(report.lastPathComponent) 与检测到进程退出的时间间隔小于 10s，已确认崩溃")
-                    reportURL = report
-                    isCrash = true
-                    break
-                }
-            }
-        }
-        Thread.sleep(forTimeInterval: 1)
-    }
-    
-    if !isCrash {
-        log("进程正常退出")
-        return
-    }
-    let dateFormatter = DateFormatter()
-    dateFormatter.dateFormat = "yyyyMMdd-HHmmSS"
-    let exportDestination: URL = .desktopDirectory.appending(path: "PCL.Mac_崩溃报告_\(dateFormatter.string(from: exitTime))")
-    try? FileManager.default.createDirectory(at: exportDestination, withIntermediateDirectories: true)
-    
-    // 拷贝日志与诊断报告
-    try? FileManager.default.copyItem(
-        at: .applicationSupportDirectory.appending(path: "PCL-Mac").appending(path: "Logs").appending(path: "app.log"),
-        to: exportDestination.appending(path: "app.log")
-    )
-    try? FileManager.default.copyItem(at: reportURL, to: exportDestination.appending(path: "DiagnosticReport.ips"))
-    
-    log("日志拷贝完成")
-    
-    // 显示弹窗
-    showDialog(message: "一个崩溃报告已被生成在你的桌面上，请压缩它并发送到用户群。", title: "PCL.Mac 已崩溃")
-}
+let arguments = Array(ProcessInfo.processInfo.arguments.dropFirst())
 
-log("PCL.Mac.Daemon 已启动")
-
-guard let application = NSWorkspace.shared.runningApplications
-    .filter({ $0.bundleIdentifier == "io.github.pcl-communtiy.PCL-Mac" }).first else {
-    warn("未识别到与 PCL.Mac Bundle ID 一致的进程")
+if arguments.count != 2 {
+    print("Usage: daemon <pid> <flag_path>")
     exit(1)
 }
 
-let pid = application.processIdentifier
-
-log("父进程 PID: \(pid)")
-
-while true {
-    if !isProcessRunning(pid: pid) {
-        do {
-            try onProcessExit()
-        } catch {
-            err("无法处理退出: \(error.localizedDescription)")
-        }
-        break
-    }
-    Thread.sleep(forTimeInterval: 1)
+guard let parentPID: pid_t = Int32(arguments[0]) else {
+    print("Invalid PID")
+    exit(1)
 }
+let flagURL: URL = URL(fileURLWithPath: arguments[1])
+
+debug("父进程 PID: \(parentPID)")
+debug("正常退出标记位置: \(flagURL.path)")
+
+let source: any DispatchSourceProcess = DispatchSource.makeProcessSource(identifier: parentPID, eventMask: .exit)
+source.setEventHandler {
+    if FileManager.default.fileExists(atPath: flagURL.path) {
+        log("进程非正常退出")
+        let crashTime = Date()
+        let watcher = CrashReportWatcher()
+        log("开始监听诊断报告目录")
+        watcher.startWatching { url in
+            if url.lastPathComponent.starts(with: "PCL.Mac") {
+                log("发现诊断报告 \(url.lastPathComponent)")
+                exportCrashReport(crashTime, url)
+                exit(0)
+            }
+        }
+        warn("未检测到诊断报告创建")
+        exit(0)
+    } else {
+        log("进程正常退出")
+    }
+}
+source.resume()
+dispatchMain()

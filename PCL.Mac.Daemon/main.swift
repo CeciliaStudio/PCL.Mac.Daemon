@@ -30,10 +30,9 @@ func exportCrashReport(_ crashTime: Date, _ diagnosticReportURL: URL) {
         let logURL = fileManager.homeDirectoryForCurrentUser
             .appending(path: "Library")
             .appending(path: "Application Support")
-            .appending(path: "PCL-Mac")
+            .appending(path: "PCL.Mac")
             .appending(path: "Logs")
-            .appending(path: "app.log")
-        try fileManager.copyItem(at: logURL, to: reportURL.appending(path: "启动器日志.log"))
+        try fileManager.copyItem(at: logURL, to: reportURL.appending(path: "启动器日志"))
         showDialog(message: "很抱歉，PCL.Mac 因为一些问题崩溃了……\n一个诊断报告已被生成在你的桌面上。\n若要寻求帮助，请将诊断报告压缩并发给他人，而不是发送此页面的照片或截图。")
     } catch {
         err("无法导出崩溃报告: \(error.localizedDescription)")
